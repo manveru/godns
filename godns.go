@@ -1,17 +1,17 @@
 package main
 
 import (
-	"log"
-	"json"
-	"os"
-	"net"
-	"strconv"
-	"io/ioutil"
-	"bytes"
-	"fmt"
 	"bufio"
-	"http"
+	"bytes"
 	"dns"
+	"fmt"
+	"http"
+	"io/ioutil"
+	"json"
+	"log"
+	"net"
+	"os"
+	"strconv"
 )
 
 type Logger interface {
