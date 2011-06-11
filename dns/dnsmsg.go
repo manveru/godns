@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-  "net"
+	"net"
 )
 
 // Packet formats

@@ -150,29 +150,29 @@ func listen(logger Logger, conn *net.UDPConn) {
 	msg.Unpack(raw)
 	lookup := msg.Question[0].Name
 
-  var lookupResult string
-  logger.Println(lookup[len(lookup)-5:])
-  if lookup[len(lookup)-5:] == ".bit." {
-    lookupResult = bitcoindLookup(lookup)
+	var lookupResult string
+	logger.Println(lookup[len(lookup)-5:])
+	if lookup[len(lookup)-5:] == ".bit." {
+		lookupResult = bitcoindLookup(lookup)
 
-    if lookupResult != "" {
-      logger.Println(lookup, "=>", lookupResult)
+		if lookupResult != "" {
+			logger.Println(lookup, "=>", lookupResult)
 
-      out, _ := createResponse(msg, lookup, lookupResult)
-      conn.WriteToUDP(out, addr)
-      return
-    }
-  }
+			out, _ := createResponse(msg, lookup, lookupResult)
+			conn.WriteToUDP(out, addr)
+			return
+		}
+	}
 
-  // fall back to other lookup
+	// fall back to other lookup
 
-  msg.Rcode = dns.RcodeNameError
+	msg.Rcode = dns.RcodeNameError
 	msg.Response = true
 	msg.Authoritative = false
 	msg.Recursion_desired = true
 	msg.Recursion_available = false
 	out, _ := msg.Pack()
-  conn.WriteToUDP(out, addr)
+	conn.WriteToUDP(out, addr)
 }
 
 func createResponse(msg *dns.Msg, name, ipstr string) (out []byte, ok bool) {
@@ -195,10 +195,10 @@ func createResponse(msg *dns.Msg, name, ipstr string) (out []byte, ok bool) {
 	}
 	rra.Hdr = *rrh
 
-  fmt.Printf("%#v", rra.Hdr)
-  fmt.Printf("%#v", rra)
+	fmt.Printf("%#v", rra.Hdr)
+	fmt.Printf("%#v", rra)
 
-  msg.Rcode = dns.RcodeSuccess
+	msg.Rcode = dns.RcodeSuccess
 	msg.Answer = append(msg.Answer, rra)
 	msg.Response = true
 	msg.Authoritative = true
@@ -206,5 +206,5 @@ func createResponse(msg *dns.Msg, name, ipstr string) (out []byte, ok bool) {
 	msg.Recursion_available = true
 
 	out, ok = msg.Pack()
-  return
+	return
 }
