@@ -120,13 +120,21 @@ func bitcoindLookup(name string) (addr string) {
 
 func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
-	logger.Println("The GoDNS")
+	logger.Println("Starting GoDNS")
 
 	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53")
-	logger.Println("addr:", addr, "err:", err)
+	if err == nil {
+		logger.Println("Resolved listening address:", addr)
+	} else {
+		logger.Println("Failure resolving listening address:", err)
+	}
 
 	conn, err := net.ListenUDP("udp", addr)
-	logger.Println("conn:", conn, "err:", err)
+	if err == nil {
+		logger.Println("Listening.")
+	} else {
+		logger.Fatalln(err)
+	}
 
 	for {
 		listen(logger, conn)
