@@ -16,6 +16,7 @@ import (
 
 type Logger interface {
 	Println(...interface{})
+	Printf(string, ...interface{})
 	Fatalln(...interface{})
 }
 
@@ -134,29 +135,51 @@ func main() {
 
 func listen(logger Logger, conn *net.UDPConn) {
 	buffer := make([]byte, 1<<16) // according to tcpdump
-	size, addr, err := conn.ReadFromUDP(buffer)
-	logger.Println("size:", size, "addr:", addr, "err:", err)
+	size, addr, _ := conn.ReadFromUDP(buffer)
 	raw := buffer[0:size]
 
 	msg := &dns.Msg{}
 	msg.Unpack(raw)
-	logger.Println("msg:", msg)
 	lookup := msg.Question[0].Name
-	lookupResult := bitcoindLookup(lookup)
-	fmt.Printf("lookupResult: %#v\n", lookupResult)
 
-	rra := &dns.RR_A{}
-	ip := net.ParseIP(lookupResult).To4()
+  var lookupResult string
+  logger.Println(lookup[len(lookup)-5:])
+  if lookup[len(lookup)-5:] == ".bit." {
+    lookupResult = bitcoindLookup(lookup)
+
+    if lookupResult != "" {
+      logger.Println(lookup, "=>", lookupResult)
+
+      out, _ := createResponse(msg, lookup, lookupResult)
+      conn.WriteToUDP(out, addr)
+      return
+    }
+  }
+
+  // fall back to other lookup
+
+  msg.Rcode = dns.RcodeNameError
+	msg.Response = true
+	msg.Authoritative = false
+	msg.Recursion_desired = true
+	msg.Recursion_available = false
+	out, _ := msg.Pack()
+  conn.WriteToUDP(out, addr)
+}
+
+func createResponse(msg *dns.Msg, name, ipstr string) (out []byte, ok bool) {
+	ip := net.ParseIP(ipstr).To4()
 	if len(ip) != 4 {
 		return
 	}
 	fmt.Printf("ip: %#v\n", ip)
 
 	var a uint32
+	rra := &dns.RR_A{}
 	rra.A = (a | uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3]))
 
 	rrh := &dns.RR_Header{
-		Name:     lookup,
+		Name:     name,
 		Rrtype:   dns.TypeA,
 		Class:    dns.ClassINET,
 		Ttl:      60,
@@ -167,12 +190,13 @@ func listen(logger Logger, conn *net.UDPConn) {
   fmt.Printf("%#v", rra.Hdr)
   fmt.Printf("%#v", rra)
 
+  msg.Rcode = dns.RcodeSuccess
 	msg.Answer = append(msg.Answer, rra)
 	msg.Response = true
 	msg.Authoritative = true
 	msg.Recursion_desired = true
 	msg.Recursion_available = true
 
-	out, _ := msg.Pack()
-	conn.WriteToUDP(out, addr)
+	out, ok = msg.Pack()
+  return
 }
