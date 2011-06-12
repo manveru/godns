@@ -51,15 +51,15 @@ func listen(conn *net.UDPConn) {
 	msg := &dns.Msg{}
 	msg.Unpack(raw)
 
-	respondTo(conn, addr, msg)
+	respondTo(conn, addr, msg, raw)
 }
 
-func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg) {
+func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg, raw []uint8) {
 	for _, question := range msg.Question {
 		if strings.HasSuffix(question.Name, ".bit.") {
 			respondWithDotBit(msg, question)
 		} else {
-			respondWithFallback(msg, question)
+			respondWithFallback(raw, msg, question)
 		}
 	}
 
@@ -213,7 +213,38 @@ func answerAAAA(msg *dns.Msg, question dns.Question, name []string, value NMCVal
 	msg.Recursion_available = true
 }
 
-func respondWithFallback(msg *dns.Msg, question dns.Question) {
+func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Question) {
+	addr, err := net.ResolveUDPAddr("udp", "8.8.8.8:53")
+	if err != nil {
+		LOG.Fatalln(err)
+	}
+
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		LOG.Fatalln(err)
+	}
+
+	conn.WriteToUDP(raw, addr)
+
+	buffer := make([]byte, 1<<16)
+	size, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		LOG.Fatalln(err)
+	}
+
+	msg := &dns.Msg{}
+	msg.Unpack(buffer[0:size])
+	LOG.Println(msg)
+
+	for _, answer := range msg.Answer {
+		clientMsg.Answer = append(clientMsg.Answer, answer)
+	}
+
+	clientMsg.Rcode = msg.Rcode
+	clientMsg.Response = msg.Response
+	clientMsg.Authoritative = msg.Authoritative
+	clientMsg.Recursion_desired = msg.Recursion_desired
+	clientMsg.Recursion_available = msg.Recursion_available
 }
 
 type Mapping map[string]string
