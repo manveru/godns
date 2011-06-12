@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"dns"
-	"fmt"
 	"http"
 	"io/ioutil"
+	"strings"
 	"json"
 	"log"
 	"net"
@@ -14,20 +14,218 @@ import (
 	"strconv"
 )
 
-type Logger interface {
-	Println(...interface{})
-	Printf(string, ...interface{})
-	Fatalln(...interface{})
+var (
+	LOG = log.New(os.Stdout, "", log.LstdFlags)
+)
+
+func main() {
+	LOG.Println("Starting GoDNS")
+
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53")
+	if err == nil {
+		LOG.Println("Resolved listening address:", addr)
+	} else {
+		LOG.Fatalln("Failure resolving listening address:", err)
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err == nil {
+		LOG.Println("Listening.")
+	} else {
+		LOG.Fatalln(err)
+	}
+
+	for {
+		listen(conn)
+	}
 }
 
-type RPCData struct {
+func listen(conn *net.UDPConn) {
+	buffer := make([]byte, 1<<16) // according to tcpdump
+	size, addr, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		LOG.Fatalln("Error trying to read:", err)
+	}
+	raw := buffer[0:size]
+
+	msg := &dns.Msg{}
+	msg.Unpack(raw)
+
+	respondTo(conn, addr, msg)
+}
+
+func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg) {
+	for _, question := range msg.Question {
+		if strings.HasSuffix(question.Name, ".bit.") {
+			respondWithDotBit(msg, question)
+		} else {
+			respondWithFallback(msg, question)
+		}
+	}
+
+	out, ok := msg.Pack()
+	if ok == true {
+		conn.WriteToUDP(out, addr)
+	} else {
+		LOG.Fatalln("msg.Pack() failed")
+	}
+}
+
+// For now, we only answer queries for A and NS
+func respondWithDotBit(msg *dns.Msg, question dns.Question) {
+	// "foo.bar.bit." => ["foo", "bar", "bit"]
+	name := strings.Split(question.Name[0:len(question.Name)-1], ".", -1)
+
+	// edge case, if we get "bit." as question.Name
+	// TODO: handle as proper error
+	if len(name) <= 1 {
+		return
+	}
+	// ["foo", "bar", "bit"] => ["foo", "bar"]
+	name = name[0 : len(name)-1]
+
+	LOG.Println("name:", name)
+
+	// look up the root "d/bar"
+	record, err := nmcLookup(name[len(name)-1])
+
+	if err != nil {
+		LOG.Fatalln(err)
+	}
+
+	LOG.Println(record)
+
+	var value NMCValue
+	json.Unmarshal([]uint8(record.Value), &value)
+
+	LOG.Println(value)
+
+	msg.Response = true
+
+	switch question.Qtype {
+	case dns.TypeA:
+		answerA(msg, question, name, value)
+	case dns.TypeAAAA:
+		answerAAAA(msg, question, name, value)
+		//case dns.TypeNS:    answerNS(msg)
+		//case dns.TypeMD:    answerMD(msg)
+		//case dns.TypeMF:    answerMF(msg)
+		//case dns.TypeCNAME: answerCNAME(msg)
+		//case dns.TypeSOA:   answerSOA(msg)
+		//case dns.TypeMB:    answerMB(msg)
+		//case dns.TypeMG:    answerMG(msg)
+		//case dns.TypeMR:    answerMR(msg)
+		//case dns.TypeNULL:  answerNULL(msg)
+		//case dns.TypeWKS:   answerWKS(msg)
+		//case dns.TypePTR:   answerPTR(msg)
+		//case dns.TypeHINFO: answerHINFO(msg)
+		//case dns.TypeMINFO: answerMINFO(msg)
+		//case dns.TypeMX:    answerMX(msg)
+		//case dns.TypeTXT:   answerTXT(msg)
+		//case dns.TypeSRV:   answerSRV(msg)
+	default:
+		msg.Rcode = dns.RcodeNotImplemented
+	}
+}
+
+func answerA(msg *dns.Msg, question dns.Question, name []string, value NMCValue) {
+	var parsedIp net.IP
+	// len == 1 means root domain: check "ip" and "map".""
+	if len(name) == 1 {
+		vips := value.Ip
+
+		// this is legacy support
+		if len(vips) == 0 {
+			vmip := value.Map[""]
+			if vmip == "" {
+				// can't answer, make an error here.
+				return
+			} else {
+				parsedIp = net.ParseIP(vmip)
+			}
+		} else {
+			parsedIp = net.ParseIP(vips[0])
+		}
+	}
+
+	ip := parsedIp.To4()
+	if ip == nil {
+		return
+	}
+
+	var a uint32
+	rra := &dns.RR_A{}
+	rra.A = (a | uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3]))
+
+	rrh := &dns.RR_Header{
+		Name:     question.Name,
+		Rrtype:   dns.TypeA,
+		Class:    dns.ClassINET,
+		Ttl:      60,
+		Rdlength: 100,
+	}
+	rra.Hdr = *rrh
+
+	msg.Rcode = dns.RcodeSuccess
+	msg.Answer = append(msg.Answer, rra)
+	msg.Response = true
+	msg.Authoritative = true
+	msg.Recursion_desired = true
+	msg.Recursion_available = true
+}
+
+func answerAAAA(msg *dns.Msg, question dns.Question, name []string, value NMCValue) {
+	var parsedIp net.IP
+	// len == 1 means root domain: check "ip" and "map".""
+	if len(name) == 1 {
+		vips := value.Ip6
+
+		if len(vips) == 0 {
+			// can't answer, make an error here.
+			return
+		} else {
+			parsedIp = net.ParseIP(vips[0])
+		}
+	}
+
+	ip := parsedIp.To16()
+	if ip == nil {
+		return
+	}
+
+	rraaaa := &dns.RR_AAAA{}
+	copy(ip, rraaaa.AAAA[:])
+
+	rrh := &dns.RR_Header{
+		Name:     question.Name,
+		Rrtype:   dns.TypeAAAA,
+		Class:    dns.ClassINET,
+		Ttl:      60,
+		Rdlength: 100,
+	}
+	rraaaa.Hdr = *rrh
+
+	msg.Rcode = dns.RcodeSuccess
+	msg.Answer = append(msg.Answer, rraaaa)
+	msg.Response = true
+	msg.Authoritative = true
+	msg.Recursion_desired = true
+	msg.Recursion_available = true
+}
+
+func respondWithFallback(msg *dns.Msg, question dns.Question) {
+}
+
+type Mapping map[string]string
+
+type NMCData struct {
 	Jsonrpc string        "jsonrpc"
 	Id      string        "id"
 	Method  string        "method"
 	Params  []interface{} "params"
 }
 
-type RPCError struct {
+type NMCError struct {
 	Code    int    "code"
 	Message string "message"
 }
@@ -39,13 +237,13 @@ type ResultDetail struct {
 	TxId      string "txid"
 }
 
-type RPCNameScanResponse struct {
+type NMCResponse struct {
 	Result []ResultDetail "result"
-	Error  RPCError
+	Error  NMCError
 	Id     string "id"
 }
 
-func namecoindPOST(body *bytes.Buffer) (response *http.Response, err os.Error) {
+func nmcPOST(body *bytes.Buffer) (response *http.Response, err os.Error) {
 	client := http.Client{}
 
 	var req http.Request
@@ -59,152 +257,48 @@ func namecoindPOST(body *bytes.Buffer) (response *http.Response, err os.Error) {
 		"Content-Length": []string{strconv.Itoa(body.Len())},
 	}
 	req.ContentLength = int64(body.Len())
-	req.URL, err = http.ParseURL("http://manveru:pass@127.0.0.1:8332/")
-	if err != nil {
-		fmt.Println("err:", err)
-	}
+	req.URL, _ = http.ParseURL("http://manveru:pass@127.0.0.1:8332/")
 
 	return client.Do(&req)
 }
 
-func namecoidRequest(data RPCData) (responseBody []byte) {
-	jsonData, err := json.Marshal(data)
-	response, err := namecoindPOST(bytes.NewBuffer(jsonData))
-	if err != nil {
-		fmt.Println("err:", err)
-	}
+func namecoidRequest(data NMCData) (responseBody []byte, err os.Error) {
+	jsonData, _ := json.Marshal(data)
+	response, err := nmcPOST(bytes.NewBuffer(jsonData))
 
 	if response.StatusCode == 200 {
 		reader := bufio.NewReader(response.Body)
 		responseBody = make([]byte, response.ContentLength)
-		_, err := reader.Read(responseBody)
-		if err != nil {
-			panic(err)
-		}
+		reader.Read(responseBody)
 	}
 
 	return
 }
 
-type RPCNameScanValue struct {
+type NMCValue struct {
+	Ip  []string
+	Ip6 []string
 	Map map[string]string "map"
 }
 
-func bitcoindLookup(name string) (addr string) {
+func nmcLookup(name string) (record ResultDetail, err os.Error) {
 	params := make([]interface{}, 2)
-	params[0] = "d/" + name[0:len(name)-5]
+	params[0] = "d/" + name
 	params[1] = 1
-	data := RPCData{Jsonrpc: "1.0", Id: "godns", Method: "name_scan", Params: params}
-	fmt.Println(data)
-	responseBody := namecoidRequest(data)
+	data := NMCData{Jsonrpc: "1.0", Id: "godns", Method: "name_scan", Params: params}
+	responseBody, err := namecoidRequest(data)
+	if err != nil {
+		return
+	}
 
-	var response RPCNameScanResponse
+	var response NMCResponse
 	json.Unmarshal(responseBody, &response)
-	fmt.Printf("%#v\n", response)
 
-	var value RPCNameScanValue
-	results := response.Result
-	if len(results) == 0 {
-		return
-	}
-	resultValue := results[0].Value
-	json.Unmarshal([]uint8(resultValue), &value)
-	fmt.Printf("%#v\n", value)
-
-	if value.Map != nil {
-		addr = value.Map[""]
-	}
-
-	return
-}
-
-func main() {
-	logger := log.New(os.Stdout, "", log.LstdFlags)
-	logger.Println("Starting GoDNS")
-
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53")
-	if err == nil {
-		logger.Println("Resolved listening address:", addr)
+	if response.Error.Code == 0 {
+		record = response.Result[0]
 	} else {
-		logger.Println("Failure resolving listening address:", err)
+		err = os.NewError(response.Error.Message)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err == nil {
-		logger.Println("Listening.")
-	} else {
-		logger.Fatalln(err)
-	}
-
-	for {
-		listen(logger, conn)
-	}
-}
-
-func listen(logger Logger, conn *net.UDPConn) {
-	buffer := make([]byte, 1<<16) // according to tcpdump
-	size, addr, _ := conn.ReadFromUDP(buffer)
-	raw := buffer[0:size]
-
-	msg := &dns.Msg{}
-	msg.Unpack(raw)
-	lookup := msg.Question[0].Name
-
-	var lookupResult string
-	logger.Println(lookup[len(lookup)-5:])
-	if lookup[len(lookup)-5:] == ".bit." {
-		lookupResult = bitcoindLookup(lookup)
-
-		if lookupResult != "" {
-			logger.Println(lookup, "=>", lookupResult)
-
-			out, _ := createResponse(msg, lookup, lookupResult)
-			conn.WriteToUDP(out, addr)
-			return
-		}
-	}
-
-	// fall back to other lookup
-
-	msg.Rcode = dns.RcodeNameError
-	msg.Response = true
-	msg.Authoritative = false
-	msg.Recursion_desired = true
-	msg.Recursion_available = false
-	out, _ := msg.Pack()
-	conn.WriteToUDP(out, addr)
-}
-
-func createResponse(msg *dns.Msg, name, ipstr string) (out []byte, ok bool) {
-	ip := net.ParseIP(ipstr).To4()
-	if len(ip) != 4 {
-		return
-	}
-	fmt.Printf("ip: %#v\n", ip)
-
-	var a uint32
-	rra := &dns.RR_A{}
-	rra.A = (a | uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3]))
-
-	rrh := &dns.RR_Header{
-		Name:     name,
-		Rrtype:   dns.TypeA,
-		Class:    dns.ClassINET,
-		Ttl:      60,
-		Rdlength: 100,
-	}
-	rra.Hdr = *rrh
-
-	fmt.Printf("%#v", rra.Hdr)
-	fmt.Printf("%#v", rra)
-
-	msg.Rcode = dns.RcodeSuccess
-	msg.Answer = append(msg.Answer, rra)
-	msg.Response = true
-	msg.Authoritative = true
-	msg.Recursion_desired = true
-	msg.Recursion_available = true
-
-	out, ok = msg.Pack()
-	return
+	return // we never get here anyway
 }

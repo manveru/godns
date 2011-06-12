@@ -17,7 +17,7 @@ import (
 
 // Wire constants.
 const (
-	// valid RR_Header.Rrtype and Question.qtype
+	// valid RR_Header.Rrtype and Question.Qtype
 	TypeA     = 1
 	TypeNS    = 2
 	TypeMD    = 3
@@ -37,7 +37,7 @@ const (
 	TypeAAAA  = 28
 	TypeSRV   = 33
 
-	// valid Question.qtype only
+	// valid Question.Qtype only
 	TypeAXFR  = 252
 	TypeMAILB = 253
 	TypeMAILA = 254
