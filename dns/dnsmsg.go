@@ -57,6 +57,10 @@ const (
 	RcodeNameError      = 3
 	RcodeNotImplemented = 4
 	RcodeRefused        = 5
+
+	OpQuery        = 0 // a standard query (QUERY)
+	OpInverseQuery = 1 // an inverse query (IQUERY)
+	OpStatus       = 2 // a server status request (STATUS)
 )
 
 // The wire format for the DNS packet header.
@@ -613,8 +617,8 @@ type Msg struct {
 	MsgHdr
 	Question []Question
 	Answer   []RR
-	ns       []RR
-	extra    []RR
+	NS       []RR
+	Extra    []RR
 }
 
 func (dns *Msg) Pack() (msg []byte, ok bool) {
@@ -642,8 +646,8 @@ func (dns *Msg) Pack() (msg []byte, ok bool) {
 	// Prepare variable sized arrays.
 	question := dns.Question
 	answer := dns.Answer
-	ns := dns.ns
-	extra := dns.extra
+	ns := dns.NS
+	extra := dns.Extra
 
 	dh.Qdcount = uint16(len(question))
 	dh.Ancount = uint16(len(answer))
@@ -696,8 +700,8 @@ func (dns *Msg) Unpack(msg []byte) bool {
 	// Arrays.
 	dns.Question = make([]Question, dh.Qdcount)
 	dns.Answer = make([]RR, 0, dh.Ancount)
-	dns.ns = make([]RR, 0, dh.Nscount)
-	dns.extra = make([]RR, 0, dh.Arcount)
+	dns.NS = make([]RR, 0, dh.Nscount)
+	dns.Extra = make([]RR, 0, dh.Arcount)
 
 	var rec RR
 
@@ -716,14 +720,14 @@ func (dns *Msg) Unpack(msg []byte) bool {
 		if !ok {
 			return false
 		}
-		dns.ns = append(dns.ns, rec)
+		dns.NS = append(dns.NS, rec)
 	}
 	for i := 0; i < int(dh.Arcount); i++ {
 		rec, off, ok = unpackRR(msg, off)
 		if !ok {
 			return false
 		}
-		dns.extra = append(dns.extra, rec)
+		dns.Extra = append(dns.Extra, rec)
 	}
 	//	if off != len(msg) {
 	//		println("extra bytes in dns packet", off, "<", len(msg));
@@ -733,29 +737,34 @@ func (dns *Msg) Unpack(msg []byte) bool {
 
 func (dns *Msg) String() string {
 	s := "DNS: " + printStruct(&dns.MsgHdr) + "\n"
+
 	if len(dns.Question) > 0 {
 		s += "-- Questions\n"
-		for i := 0; i < len(dns.Question); i++ {
-			s += printStruct(&dns.Question[i]) + "\n"
+		for _, question := range dns.Question {
+			s += printStruct(&question) + "\n"
 		}
 	}
+
 	if len(dns.Answer) > 0 {
 		s += "-- Answers\n"
-		for i := 0; i < len(dns.Answer); i++ {
-			s += printStruct(dns.Answer[i]) + "\n"
+		for _, answer := range dns.Answer {
+			s += printStruct(answer) + "\n"
 		}
 	}
-	if len(dns.ns) > 0 {
+
+	if len(dns.NS) > 0 {
 		s += "-- Name servers\n"
-		for i := 0; i < len(dns.ns); i++ {
-			s += printStruct(dns.ns[i]) + "\n"
+		for _, ns := range dns.NS {
+			s += printStruct(ns) + "\n"
 		}
 	}
-	if len(dns.extra) > 0 {
+
+	if len(dns.Extra) > 0 {
 		s += "-- Extra\n"
-		for i := 0; i < len(dns.extra); i++ {
-			s += printStruct(dns.extra[i]) + "\n"
+		for _, extra := range dns.Extra {
+			s += printStruct(extra) + "\n"
 		}
 	}
+
 	return s
 }

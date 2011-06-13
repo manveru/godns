@@ -6,6 +6,8 @@ import (
 	"dns"
 	"flag"
 	"http"
+	"rand"
+	"time"
 	"io/ioutil"
 	"json"
 	"log"
@@ -25,7 +27,7 @@ type Options struct {
 var (
 	LOG           = log.New(os.Stdout, "", log.LstdFlags)
 	options       = Options{}
-	flagNmcUrl    *string = flag.String("nmc", "http://user:pass@127.0.0.1:8332/", "URI to connect to namecoind")
+	flagNmcUrl    *string = flag.String("nmc", "http://user:pass@127.0.0.1:8332/", "namecoind URI")
 	flagUdpListen *string = flag.String("listen", "127.0.0.1:53", "UDP host:port to listen at")
 	flagDnsProxy  *string = flag.String("dns", "8.8.8.8:53", "DNSd that handles non-.bit queries")
 )
@@ -82,7 +84,7 @@ func main() {
 }
 
 func listen(conn *net.UDPConn) {
-	buffer := make([]byte, 1<<16) // according to tcpdump
+	buffer := make([]byte, 1<<15) // according to tcpdump
 	size, addr, err := conn.ReadFromUDP(buffer)
 	if err != nil {
 		LOG.Fatalln("Error trying to read:", err)
@@ -100,7 +102,7 @@ func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg, raw []uint8) 
 		if strings.HasSuffix(question.Name, ".bit.") {
 			respondWithDotBit(msg, question)
 		} else {
-			respondWithFallback(raw, msg, question)
+			respondWithFallback(raw, msg, question, options.dnsProxy)
 		}
 	}
 
@@ -165,6 +167,7 @@ func respondWithDotBit(msg *dns.Msg, question dns.Question) {
 		//case dns.TypeTXT:   answerTXT(msg)
 		//case dns.TypeSRV:   answerSRV(msg)
 	default:
+		LOG.Fatalln("Cannot serve name:", name, "qtype:", question.Qtype)
 		msg.Rcode = dns.RcodeNotImplemented
 	}
 }
@@ -188,7 +191,86 @@ func answerA(msg *dns.Msg, question dns.Question, name []string, value NMCValue)
 				return
 			}
 
-			parsedIp = net.ParseIP(vmip)
+			switch vmip.(type) {
+			case nil:
+				return
+			case map[string]interface{}:
+				nsAvailable := vmip.(map[string]interface{})["ns"]
+
+				switch nsAvailable.(type) {
+				case []interface{}:
+					ns := nsAvailable.([]interface{})[0]
+
+					switch ns.(type) {
+					case string:
+						h := dns.MsgHdr{
+							Id:                uint16(rand.Int()) ^ uint16(time.Nanoseconds()),
+							Recursion_desired: true,
+						}
+
+						q := &dns.Question{
+							Name:   question.Name,
+							Qtype:  dns.TypeA,
+							Qclass: dns.ClassINET,
+						}
+
+						m := &dns.Msg{}
+						m.MsgHdr = h
+						m.Question = append(m.Question, *q)
+
+						LOG.Println(m)
+
+						out, ok := m.Pack()
+						if !ok {
+							LOG.Fatalln("Failed to Pack:", msg)
+						}
+
+						nsaddr := ns.(string) + ":53"
+						conn, err := net.Dial("udp", nsaddr)
+						if err != nil {
+							LOG.Fatalf("net.DialUDP(\"udp\", nil, %v) => %v", nsaddr, err)
+						}
+						LOG.Println("out:", out)
+
+						n, err := conn.Write(out)
+						if err != nil {
+							LOG.Fatalln(err)
+						}
+						LOG.Println("wrote:", n)
+
+						conn.SetReadTimeout(10e9)
+						defer conn.Close()
+
+						b := make([]byte, 1<<15)
+						s, err := conn.Read(b)
+						if err != nil {
+							LOG.Fatalln(err, nsaddr)
+						}
+
+						err = conn.Close()
+						if err != nil {
+							LOG.Fatalln(err)
+						}
+
+						a := &dns.Msg{}
+						a.Unpack(b[0:s])
+
+						LOG.Println("a:", a)
+
+						msg.Answer = append(msg.Answer, a.Answer[0])
+						return
+					default:
+						LOG.Printf("can't find the type of: %#v", ns)
+					}
+				default:
+					LOG.Printf("can't find the type of: %#v", nsAvailable)
+				}
+			case string:
+				parsedIp = net.ParseIP(vmip.(string))
+			default:
+				LOG.Printf("can't find the type of: %#v", vmip)
+			}
+
 		} else {
 			parsedIp = net.ParseIP(vips[0])
 		}
@@ -263,22 +345,25 @@ func answerAAAA(msg *dns.Msg, question dns.Question, name []string, value NMCVal
 	msg.Recursion_available = true
 }
 
-func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Question) {
-	conn, err := net.DialUDP("udp", nil, options.dnsProxy)
+func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Question, proxy *net.UDPAddr) {
+	LOG.Println("fallback:", clientQuestion, proxy)
+	conn, err := net.Dial("udp", proxy.String())
 	if err != nil {
 		LOG.Fatalln(err)
 	}
 
-	conn.WriteToUDP(raw, options.dnsProxy)
+	conn.Write(raw)
 
-	buffer := make([]byte, 1<<16)
-	size, _, err := conn.ReadFromUDP(buffer)
+	buffer := make([]byte, 1<<15)
+	size, err := conn.Read(buffer)
 	if err != nil {
-		LOG.Fatalln(err)
+		LOG.Fatalln(err, proxy)
 	}
 
 	msg := &dns.Msg{}
 	msg.Unpack(buffer[0:size])
+
+	LOG.Println(msg)
 
 	for _, answer := range msg.Answer {
 		clientMsg.Answer = append(clientMsg.Answer, answer)
@@ -290,8 +375,6 @@ func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Que
 	clientMsg.Recursion_desired = msg.Recursion_desired
 	clientMsg.Recursion_available = msg.Recursion_available
 }
-
-type Mapping map[string]string
 
 type NMCData struct {
 	Jsonrpc string        "jsonrpc"
@@ -359,7 +442,7 @@ func namecoidRequest(data NMCData) (responseBody []byte, err os.Error) {
 type NMCValue struct {
 	Ip  []string
 	Ip6 []string
-	Map map[string]string "map"
+	Map map[string]interface{} "map"
 }
 
 func nmcLookup(name string) (record ResultDetail, err os.Error) {
