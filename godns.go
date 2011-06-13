@@ -4,34 +4,75 @@ import (
 	"bufio"
 	"bytes"
 	"dns"
+	"flag"
 	"http"
 	"io/ioutil"
-	"strings"
 	"json"
 	"log"
 	"net"
 	"os"
+	"fmt"
 	"strconv"
+	"strings"
 )
 
+type Options struct {
+	nmcURL    *http.URL
+	udpListen *net.UDPAddr
+	dnsProxy  *net.UDPAddr
+}
+
 var (
-	LOG = log.New(os.Stdout, "", log.LstdFlags)
+	LOG           = log.New(os.Stdout, "", log.LstdFlags)
+	options       = Options{}
+	flagNmcUrl    *string = flag.String("nmc", "http://user:pass@127.0.0.1:8332/", "URI to connect to namecoind")
+	flagUdpListen *string = flag.String("listen", "127.0.0.1:53", "UDP host:port to listen at")
+	flagDnsProxy  *string = flag.String("dns", "8.8.8.8:53", "DNSd that handles non-.bit queries")
 )
+
+func usage(err os.Error) {
+	fmt.Fprintf(os.Stderr, "usage: godns [options]\n")
+	flag.PrintDefaults()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start:\n%s\n", err)
+	}
+	os.Exit(2)
+}
+
+func flagParse() {
+	var err os.Error
+
+	flag.Parse()
+
+	(&options).nmcURL, err = http.ParseRequestURL(*flagNmcUrl)
+	if err != nil {
+		usage(err)
+	}
+
+	LOG.Println("Namecoind @", options.nmcURL)
+
+	(&options).udpListen, err = net.ResolveUDPAddr("udp", *flagUdpListen)
+	if err != nil {
+		usage(err)
+	}
+
+	LOG.Println("Serving DNS @", options.udpListen)
+
+	(&options).dnsProxy, err = net.ResolveUDPAddr("udp", *flagDnsProxy)
+	if err != nil {
+		usage(err)
+	}
+
+	LOG.Println("Proxy DNS @", options.dnsProxy)
+}
 
 func main() {
 	LOG.Println("Starting GoDNS")
 
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53")
-	if err == nil {
-		LOG.Println("Resolved listening address:", addr)
-	} else {
-		LOG.Fatalln("Failure resolving listening address:", err)
-	}
+	flagParse()
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err == nil {
-		LOG.Println("Listening.")
-	} else {
+	conn, err := net.ListenUDP("udp", options.udpListen)
+	if err != nil {
 		LOG.Fatalln(err)
 	}
 
@@ -214,17 +255,12 @@ func answerAAAA(msg *dns.Msg, question dns.Question, name []string, value NMCVal
 }
 
 func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Question) {
-	addr, err := net.ResolveUDPAddr("udp", "8.8.8.8:53")
+	conn, err := net.DialUDP("udp", nil, options.dnsProxy)
 	if err != nil {
 		LOG.Fatalln(err)
 	}
 
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		LOG.Fatalln(err)
-	}
-
-	conn.WriteToUDP(raw, addr)
+	conn.WriteToUDP(raw, options.dnsProxy)
 
 	buffer := make([]byte, 1<<16)
 	size, _, err := conn.ReadFromUDP(buffer)
@@ -288,14 +324,20 @@ func nmcPOST(body *bytes.Buffer) (response *http.Response, err os.Error) {
 		"Content-Length": []string{strconv.Itoa(body.Len())},
 	}
 	req.ContentLength = int64(body.Len())
-	req.URL, _ = http.ParseURL("http://manveru:pass@127.0.0.1:8332/")
+	req.URL = options.nmcURL
 
 	return client.Do(&req)
 }
 
 func namecoidRequest(data NMCData) (responseBody []byte, err os.Error) {
-	jsonData, _ := json.Marshal(data)
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		LOG.Fatalln(err)
+	}
 	response, err := nmcPOST(bytes.NewBuffer(jsonData))
+	if err != nil {
+		LOG.Fatalln(err)
+	}
 
 	if response.StatusCode == 200 {
 		reader := bufio.NewReader(response.Body)
@@ -326,6 +368,7 @@ func nmcLookup(name string) (record ResultDetail, err os.Error) {
 	json.Unmarshal(responseBody, &response)
 
 	if response.Error.Code == 0 {
+		LOG.Println(response)
 		record = response.Result[0]
 	} else {
 		err = os.NewError(response.Error.Message)
