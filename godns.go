@@ -92,7 +92,7 @@ func listen(conn *net.UDPConn) {
 	msg := &dns.Msg{}
 	msg.Unpack(raw)
 
-	respondTo(conn, addr, msg, raw)
+	go respondTo(conn, addr, msg, raw)
 }
 
 func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg, raw []uint8) {
