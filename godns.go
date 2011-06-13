@@ -115,7 +115,13 @@ func respondTo(conn *net.UDPConn, addr *net.UDPAddr, msg *dns.Msg, raw []uint8) 
 // For now, we only answer queries for A and NS
 func respondWithDotBit(msg *dns.Msg, question dns.Question) {
 	// "foo.bar.bit." => ["foo", "bar", "bit"]
-	name := strings.Split(question.Name[0:len(question.Name)-1], ".", -1)
+	nameParts := strings.Split(question.Name, ".", -1)
+	var name []string
+	for _, part := range nameParts {
+		if part != "" {
+			name = append(name, part)
+		}
+	}
 
 	// edge case, if we get "bit." as question.Name
 	// TODO: handle as proper error
@@ -125,8 +131,6 @@ func respondWithDotBit(msg *dns.Msg, question dns.Question) {
 	// ["foo", "bar", "bit"] => ["foo", "bar"]
 	name = name[0 : len(name)-1]
 
-	LOG.Println("name:", name)
-
 	// look up the root "d/bar"
 	record, err := nmcLookup(name[len(name)-1])
 
@@ -134,12 +138,8 @@ func respondWithDotBit(msg *dns.Msg, question dns.Question) {
 		LOG.Fatalln(err)
 	}
 
-	LOG.Println(record)
-
 	var value NMCValue
 	json.Unmarshal([]uint8(record.Value), &value)
-
-	LOG.Println(value)
 
 	msg.Response = true
 
@@ -177,13 +177,18 @@ func answerA(msg *dns.Msg, question dns.Question, name []string, value NMCValue)
 
 		// this is legacy support
 		if len(vips) == 0 {
-			vmip := value.Map[""]
-			if vmip == "" {
+			vmap := value.Map
+			if vmap == nil {
+				return
+			}
+
+			vmip, ok := value.Map[""]
+			if !ok && vmip == "" {
 				// can't answer, make an error here.
 				return
-			} else {
-				parsedIp = net.ParseIP(vmip)
 			}
+
+			parsedIp = net.ParseIP(vmip)
 		} else {
 			parsedIp = net.ParseIP(vips[0])
 		}
@@ -193,6 +198,8 @@ func answerA(msg *dns.Msg, question dns.Question, name []string, value NMCValue)
 	if ip == nil {
 		return
 	}
+
+	LOG.Println("A", name, "=>", ip)
 
 	var a uint32
 	rra := &dns.RR_A{}
@@ -234,6 +241,8 @@ func answerAAAA(msg *dns.Msg, question dns.Question, name []string, value NMCVal
 		return
 	}
 
+	LOG.Println("AAAA", name, "=>", ip)
+
 	rraaaa := &dns.RR_AAAA{}
 	copy(ip, rraaaa.AAAA[:])
 
@@ -270,7 +279,6 @@ func respondWithFallback(raw []uint8, clientMsg *dns.Msg, clientQuestion dns.Que
 
 	msg := &dns.Msg{}
 	msg.Unpack(buffer[0:size])
-	LOG.Println(msg)
 
 	for _, answer := range msg.Answer {
 		clientMsg.Answer = append(clientMsg.Answer, answer)
